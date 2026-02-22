@@ -1,0 +1,9 @@
+コードの保存とコミット
+
+git add .
+git commit -m "修正内容のメモ"
+git push origin main
+
+bot再起動
+
+sudo systemctl restart disbot
