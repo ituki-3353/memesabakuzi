@@ -1,0 +1,8 @@
+.env
+__pycache__/
+.venv/
+stop_flag.txt
+bot_output.log
+bot_error.log
+pycache/
+*.log
