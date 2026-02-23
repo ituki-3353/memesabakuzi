@@ -1,128 +1,128 @@
 import discord
-import yaml
 import json
 import os
 import random
-import sys
+import yaml
+import logging
+from datetime import datetime
 from dotenv import load_dotenv
 
-# --- 1. 設定・環境読み込み ---
+# --- 1. ログの設定 ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.FileHandler("bot_activity.log", encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
-YAML_PATH = '/server/Dis_bot/responses.yml'
-CONFIG_PATH = '/server/Dis_bot/config.json'
 
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-# 応答データとランダムプールの管理
-cached_responses = {}
-response_pools = {}
 config = {}
+cached_responses = {}
+shuffle_pools = {}
 
-# --- 2. データロード関数 ---
+# --- 2. 各種読み込み関数 ---
 
 def load_config():
-    """JSONからホワイトリスト等の設定を読み込む"""
-    if not os.path.exists(CONFIG_PATH):
-        default = {"allowed_channels": []}
-        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-            json.dump(default, f, indent=4)
-        return default
-    with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    try:
+        with open('config.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        logging.error(f"Failed to load config.json: {e}")
+        return {}
 
 def load_responses():
-    """YAMLから応答リストを読み込み、プールをリセットする"""
-    global cached_responses, response_pools
-    if not os.path.exists(YAML_PATH):
-        print(f"⚠️ {YAML_PATH} が見つかりません。")
-        return False
+    global cached_responses, shuffle_pools
     try:
-        with open(YAML_PATH, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f)
-            if isinstance(data, dict):
-                cached_responses = data
-                response_pools = {} # プールをリセット
-                return True
+        with open('responses.yml', 'r', encoding='utf-8') as f:
+            cached_responses = yaml.safe_load(f)
+            shuffle_pools = {trigger: [] for trigger in cached_responses.keys()}
+        logging.info("Responses loaded.")
     except Exception as e:
-        print(f"❌ YAMLエラー: {e}")
-    return False
+        logging.error(f"Failed to load responses.yml: {e}")
 
-# 初期起動時のロード
+def get_shuffled_response(trigger):
+    global shuffle_pools
+    if not shuffle_pools[trigger]:
+        shuffle_pools[trigger] = list(cached_responses[trigger])
+        random.shuffle(shuffle_pools[trigger])
+    return shuffle_pools[trigger].pop()
+
 config = load_config()
 load_responses()
 
-# --- 3. メインロジック ---
+# --- 3. イベントハンドラ ---
 
 @client.event
 async def on_ready():
-    print(f'--- Bot Status: Online ---')
-    print(f'Logged in as: {client.user.name}')
-    print(f'Monitoring Channels: {config.get("allowed_channels", [])}')
-    print(f'---')
+    logging.info(f'Logged in as {client.user}')
+    
+    # 【追加】システムログ用チャンネルへ起動通知
+    sys_log_id = config.get("system_log_channel_id")
+    if sys_log_id:
+        sys_channel = client.get_channel(sys_log_id)
+        if sys_channel:
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            embed = discord.Embed(
+                title="🚀 Bot Online",
+                description="システムの起動または再起動が完了しました。",
+                color=0x2ecc71,
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="Status", value="✅ 正常稼働中", inline=True)
+            embed.add_field(name="Time", value=now, inline=True)
+            await sys_channel.send(embed=embed)
 
 @client.event
 async def on_message(message):
     global config
-    # Bot自身の発言は無視
     if message.author == client.user:
         return
 
-    # チャンネル制限（ホワイトリスト外は無視）
     allowed_ids = config.get("allowed_channels", [])
     if message.channel.id not in allowed_ids:
         return
 
     content = message.content.strip()
 
-    # --- A. 管理コマンド (!reload) ---
+    # 管理コマンド: !reload
     if content == "!reload":
-        config = load_config()
-        if load_responses():
-            await message.channel.send("🔄 **System Reloaded:** チャンネル設定と応答リストを最新に更新しました。")
-        else:
-            await message.channel.send("❌ **Error:** 更新に失敗しました。ログを確認してください。")
+        try:
+            config = load_config()
+            load_responses()
+            await message.channel.send("🔄 **System Reloaded:** 設定を更新しました。")
+            logging.info(f"Reload by {message.author}")
+        except Exception as e:
+            await message.channel.send(f"❌ Error: {e}")
         return
 
-    # --- B. 自動応答判定 ---
-    for trigger, response in cached_responses.items():
+    # 自動応答ロジック
+    for trigger, responses in cached_responses.items():
         if trigger in content:
-            final_text = ""
+            raw_response = get_shuffled_response(trigger)
+            final_response = raw_response.replace("[userName]", message.author.display_name)
+            await message.channel.send(final_response)
 
-            # 1. リスト形式（山札方式で抽選）
-            if isinstance(response, list):
-                if not response: continue
-                if trigger not in response_pools or not response_pools[trigger]:
-                    pool = list(response)
-                    random.SystemRandom().shuffle(pool)
-                    response_pools[trigger] = pool
-                final_text = response_pools[trigger].pop()
-            
-            # 2. 単一文字列
-            elif isinstance(response, str):
-                final_text = response
-            
-            # 3. その他
-            else:
-                final_text = str(response)
+            logging.info(f"Match: '{trigger}' by {message.author}")
 
-            # --- [userName] 置換 ---
-            if "[userName]" in final_text:
-                final_text = final_text.replace("[userName]", message.author.display_name)
+            # 応答ログ通知
+            log_channel_id = config.get("log_channel_id")
+            if log_channel_id:
+                log_channel = client.get_channel(log_channel_id)
+                if log_channel:
+                    embed = discord.Embed(title="✨ 自動応答ログ", color=0x3498db)
+                    embed.add_field(name="実行者", value=message.author.mention, inline=True)
+                    embed.add_field(name="トリガー", value=f"`{trigger}`", inline=True)
+                    embed.add_field(name="送信内容", value=final_response, inline=False)
+                    await log_channel.send(embed=embed)
+            break
 
-            # 送信
-            try:
-                await message.channel.send(final_text)
-            except Exception as e:
-                print(f"❌ 送信エラー: {e}")
-            
-            break # 1メッセージに1反応
-
-# --- 4. 実行 ---
-if __name__ == "__main__":
-    if not TOKEN:
-        print("❌ DISCORD_TOKEN is missing!")
-        sys.exit(1)
+if TOKEN:
     client.run(TOKEN)
