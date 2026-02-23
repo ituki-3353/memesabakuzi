@@ -5,14 +5,17 @@ import random
 import yaml
 import logging
 from datetime import datetime
+from collections import deque
 from dotenv import load_dotenv
 
 # --- 1. ログの設定 ---
+LOG_FILE = "bot_activity.log"
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler("bot_activity.log", encoding='utf-8'),
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -27,8 +30,6 @@ client = discord.Client(intents=intents)
 config = {}
 cached_responses = {}
 shuffle_pools = {}
-
-# --- 2. 各種読み込み関数 ---
 
 def load_config():
     try:
@@ -63,21 +64,12 @@ load_responses()
 @client.event
 async def on_ready():
     logging.info(f'Logged in as {client.user}')
-    
-    # 【追加】システムログ用チャンネルへ起動通知
     sys_log_id = config.get("system_log_channel_id")
     if sys_log_id:
         sys_channel = client.get_channel(sys_log_id)
         if sys_channel:
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            embed = discord.Embed(
-                title="🚀 Bot Online",
-                description="システムの起動または再起動が完了しました。",
-                color=0x2ecc71,
-                timestamp=datetime.now()
-            )
+            embed = discord.Embed(title="🚀 Bot Online", color=0x2ecc71, timestamp=datetime.now())
             embed.add_field(name="Status", value="✅ 正常稼働中", inline=True)
-            embed.add_field(name="Time", value=now, inline=True)
             await sys_channel.send(embed=embed)
 
 @client.event
@@ -92,12 +84,44 @@ async def on_message(message):
 
     content = message.content.strip()
 
+    # --- 管理コマンド: !status ---
+    if content == "!status":
+        try:
+            # ログファイルの解析
+            ok_count = 0
+            err_count = 0
+            recent_logs = []
+
+            if os.path.exists(LOG_FILE):
+                with open(LOG_FILE, "r", encoding="utf-8") as f:
+                    # 全行読んでカウント
+                    lines = f.readlines()
+                    for line in lines:
+                        if "[INFO]" in line: ok_count += 1
+                        if "[ERROR]" in line or "[CRITICAL]" in line: err_count += 1
+                    
+                    # 直近15行を取得
+                    recent_logs = [line.strip() for line in lines[-15:]]
+            
+            log_text = "\n".join(recent_logs) if recent_logs else "ログはありません。"
+            
+            embed = discord.Embed(title="📊 Bot Status Report", color=0x9b59b6, timestamp=datetime.now())
+            embed.add_field(name="稼働状況", value="🟢 Online", inline=True)
+            embed.add_field(name="ログ統計", value=f"✅ OK: {ok_count} / ❌ ERR: {err_count}", inline=True)
+            embed.add_field(name="直近15行のログ", value=f"```text\n{log_text[:1000]}\n```", inline=False)
+            
+            await message.channel.send(embed=embed)
+            logging.info(f"Status command executed by {message.author}")
+        except Exception as e:
+            await message.channel.send(f"Status取得エラー: {e}")
+        return
+
     # 管理コマンド: !reload
     if content == "!reload":
         try:
             config = load_config()
             load_responses()
-            await message.channel.send("🔄 **System Reloaded:** 設定を更新しました。")
+            await message.channel.send("🔄 **System Reloaded**")
             logging.info(f"Reload by {message.author}")
         except Exception as e:
             await message.channel.send(f"❌ Error: {e}")
@@ -112,16 +136,14 @@ async def on_message(message):
 
             logging.info(f"Match: '{trigger}' by {message.author}")
 
-            # 応答ログ通知
             log_channel_id = config.get("log_channel_id")
             if log_channel_id:
                 log_channel = client.get_channel(log_channel_id)
                 if log_channel:
-                    embed = discord.Embed(title="✨ 自動応答ログ", color=0x3498db)
-                    embed.add_field(name="実行者", value=message.author.mention, inline=True)
-                    embed.add_field(name="トリガー", value=f"`{trigger}`", inline=True)
-                    embed.add_field(name="送信内容", value=final_response, inline=False)
-                    await log_channel.send(embed=embed)
+                    log_embed = discord.Embed(title="✨ 自動応答ログ", color=0x3498db)
+                    log_embed.add_field(name="実行者", value=message.author.mention, inline=True)
+                    log_embed.add_field(name="トリガー", value=f"`{trigger}`", inline=True)
+                    await log_channel.send(embed=log_embed)
             break
 
 if TOKEN:
