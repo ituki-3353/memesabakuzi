@@ -6,12 +6,16 @@ import yaml
 import logging
 import sys
 import subprocess
+import re  # 正規表現用
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
+import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler # 追加
 
 # --- 1. ログの設定 ---
 LOG_FILE = "bot_activity.log"
+INTRO_DATA_FILE = "user_intros.json" # 自己紹介データ保存用
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +36,7 @@ client = discord.Client(intents=intents)
 config = {}
 cached_responses = {}
 shuffle_pools = {}
+user_intros = {}
 
 # --- 追加機能: Git同期処理 ---
 async def sync_git_repository():
@@ -85,6 +90,54 @@ def load_responses():
     except Exception as e:
         logging.error(f"Failed to load responses.yml: {e}")
 
+def load_intro_data():
+    global user_intros
+    if os.path.exists(INTRO_DATA_FILE):
+        try:
+            with open(INTRO_DATA_FILE, 'r', encoding='utf-8') as f:
+                user_intros = json.load(f)
+        except Exception as e:
+            logging.error(f"Failed to load intro data: {e}")
+
+def save_intro_data():
+    try:
+        with open(INTRO_DATA_FILE, 'w', encoding='utf-8') as f:
+            json.dump(user_intros, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        logging.error(f"Failed to save intro data: {e}")
+
+def parse_intro(text):
+    """
+    テンプレートの崩れに強く対応した解析ロジック。
+    【名前/name】： でも 名前： でも抽出可能。
+    """
+    data = {}
+    # 正規表現のポイント:
+    # (?:【)? -> 「【」があってもなくても良い
+    # 項目名    -> 「名前」「呼び方」など
+    # (?:.*?】)? -> 「/name】」などの補足があってもなくても良い
+    # [:：\s]* -> コロン（半角・全角）や空白が続いても良い
+    # (.*)      -> その後の文字列をすべて取得
+    patterns = {
+        "name": r"(?:【)?名前(?:.*?】)?[:：\s]*(.*)",
+        "call": r"(?:【)?呼び方(?:.*?】)?[:：\s]*(.*)",
+        "age": r"(?:【)?年齢(?:.*?】)?[:：\s]*(.*)",
+        "like": r"(?:【)?趣味(?:.*?】)?[:：\s]*(.*)",
+        "message": r"(?:【)?(?:ひとこと|一言)(?:.*?】)?[:：\s]*(.*)"
+    }
+    
+    for key, pattern in patterns.items():
+        # re.IGNORECASE で英字の大小を無視
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            # 前後の空白を消して格納
+            val = match.group(1).strip()
+            data[key] = val if val else "未設定"
+        else:
+            data[key] = "未設定"
+            
+    return data
+
 def get_shuffled_response(trigger):
     global shuffle_pools
     if not shuffle_pools[trigger]:
@@ -94,6 +147,7 @@ def get_shuffled_response(trigger):
 
 config = load_config()
 load_responses()
+load_intro_data()
 
 # --- 3. イベントハンドラ ---
 
@@ -124,17 +178,58 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
-    global config
+    global config, user_intros
     if message.author == client.user: return
 
+    content = message.content.strip()
+
+    # --- 自己紹介チャンネルの監視と自動保存 ---
+    intro_channel_id = config.get("intro_channel_id")
+    if intro_channel_id and message.channel.id == intro_channel_id:
+        if "【名前" in content: # テンプレートが含まれているか簡易チェック
+            intro_data = parse_intro(content)
+            # ユーザー名とIDをキーにして保存（検索しやすくするため）
+            user_intros[message.author.display_name] = intro_data
+            user_intros[str(message.author.id)] = intro_data
+            save_intro_data()
+            logging.info(f"Intro saved for {message.author.display_name}")
+            await message.add_reaction("✅") # 保存完了の合図
+
+    # --- 許可されたチャンネルでのコマンド処理 ---
     allowed_ids = config.get("allowed_channels", [])
     if message.channel.id not in allowed_ids: return
 
-    content = message.content.strip()
     admin_id = config.get("admin_user_id")
+
+    # !user-info [ユーザー名 or メンション]
+    if content.startswith("!user-info"):
+        target_name = content.replace("!user-info", "").strip()
+        if not target_name:
+            await message.channel.send("⚠️ 検索したいユーザー名またはメンションを入力してください。例: `!user-info やま`")
+            return
+        
+        # メンションからIDを抽出
+        match = re.match(r'<@!?(\d+)>', target_name)
+        if match:
+            user_id = match.group(1)
+            info = user_intros.get(user_id)
+        else:
+            info = user_intros.get(target_name)
+
+        if info:
+            embed = discord.Embed(title=f"👤 {info.get('name', target_name)} さんの自己紹介", color=0x3498db)
+            embed.add_field(name="呼び方", value=info.get("call", "未設定"), inline=True)
+            embed.add_field(name="年齢", value=info.get("age", "未設定"), inline=True)
+            embed.add_field(name="趣味・好きなこと", value=info.get("like", "未設定"), inline=False)
+            embed.add_field(name="ひとこと", value=info.get("message", "未設定"), inline=False)
+            await message.channel.send(embed=embed)
+        else:
+            await message.channel.send(f"🔍 `{target_name}` さんの自己紹介データは見つかりませんでした。")
+        return
 
     if content == "!help":
         embed = discord.Embed(title="📜 コマンドヘルプ", color=0x34495e)
+        embed.add_field(name="!user-info [名前 or @メンション]", value="自己紹介情報を検索", inline=False)
         embed.add_field(name="!status", value="統計と直近ログを表示", inline=False)
         embed.add_field(name="!reload", value="設定とGit同期を手動実行", inline=False)
         embed.add_field(name="!logreset", value="ログファイルをリセット", inline=False)
