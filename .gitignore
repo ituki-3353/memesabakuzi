@@ -6,3 +6,4 @@ bot_output.log
 bot_error.log
 pycache/
 *.log
+user_intros.json

@@ -155,25 +155,47 @@ load_intro_data()
 async def on_ready():
     logging.info(f'Logged in as {client.user} (ID: {client.user.id})')
     
-    # 定期実行スケジューラーの開始 (10分ごとにGitチェック)
+    # スケジューラー開始
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(sync_git_repository, 'interval', minutes=60) #１時間更新
+    scheduler.add_job(sync_git_repository, 'interval', minutes=10)
     scheduler.start()
 
+    # --- 既存の自己紹介をインポートする処理 ---
+    intro_channel_id = config.get("intro_channel_id")
+    count = 0
+    if intro_channel_id:
+        intro_channel = client.get_channel(intro_channel_id)
+        if intro_channel:
+            logging.info("Scanning existing introductions...")
+            # 過去のメッセージを200件（必要に応じて増減）取得
+            async for msg in intro_channel.history(limit=200):
+                if msg.author == client.user: continue
+                if "名前" in msg.content:
+                    intro_data = parse_intro(msg.content)
+                    if intro_data["name"] != "未設定":
+                        # 既存データと重複しても最新のもので更新
+                        user_intros[msg.author.display_name] = intro_data
+                        user_intros[msg.author.name] = intro_data
+                        user_intros[intro_data["name"]] = intro_data
+                        count += 1
+            save_intro_data()
+            logging.info(f"Imported {count} introductions from history.")
+
+    # 起動通知の送信
     utc_tz = timezone.utc
     jst_tz = timezone(timedelta(hours=9))
     now_utc = datetime.now(utc_tz)
     now_jst = datetime.now(jst_tz)
-    format_str = "%Y-%m-%d %H:%M:%S"
 
     sys_log_id = config.get("system_log_channel_id")
     if sys_log_id:
         sys_channel = client.get_channel(sys_log_id)
         if sys_channel:
-            embed = discord.Embed(title="🚀 Bot Online", color=0x2ecc71, timestamp=now_utc)
+            embed = discord.Embed(title="再起動しました！", color=0x2ecc71, timestamp=now_utc)
             embed.add_field(name="ステータス", value="✅ 正常稼働中", inline=True)
-            embed.add_field(name="Git同期", value="🔄 60分毎に自動チェック中", inline=True)
-            embed.add_field(name="JST (日本標準時)", value=f"`{now_jst.strftime(format_str)}`", inline=False)
+            embed.add_field(name="過去ログ同期", value=f"✅ {count}件インポート済み", inline=True)
+            embed.add_field(name="JST (日本標準時)", value=f"`{now_jst.strftime('%Y-%m-%d %H:%M:%S')}`", inline=False)
+            embed.add_field(name="", value="再起動が要求されたため、再起動しました。", inline=False)
             await sys_channel.send(embed=embed)
 
 @client.event
@@ -205,7 +227,7 @@ async def on_message(message):
     if content.startswith("!user-info"):
         target_name = content.replace("!user-info", "").strip()
         if not target_name:
-            await message.channel.send("⚠️ 検索したいユーザー名またはメンションを入力してください。例: `!user-info やま`")
+            await message.channel.send("⚠️ 検索したいユーザー名(サーナー内の表示名)を入力してください。例: `!user-info やま`")
             return
         
         # メンションからIDを抽出
@@ -245,10 +267,12 @@ async def on_message(message):
 
     if content == "!restart":
         if admin_id and message.author.id == admin_id:
-            await message.channel.send("🔄 再起動します...")
+            await message.channel.send("🔄 adminユーザーによる再起動が要求されました。再起動します。しばらくお待ち下さい。\
+                                       \n起動完了ログが出力されない場合はログを確認後、コードを修正してください。")
             os.execv(sys.executable, ['python3'] + sys.argv)
         else:
-            await message.channel.send("⚠️ 権限がありません。")
+            await message.channel.send("⚠️ 権限がありません。restaetコマンドは、adminリストにあるユーザーのみ使用できます。" \
+                                       "\nYou don't have permission to use this command. Only users in the admin list can use it.")
         return
 
     if content == "!status":
@@ -272,7 +296,7 @@ async def on_message(message):
 
     if content == "!reload":
         await sync_git_repository() # 手動でもGit同期を走らせる
-        await message.channel.send("🔄 Git同期とリロードが完了しました。")
+        await message.channel.send("🔄 Git同期とリロードが完了しました。 \nGit and reload has complete.")
         return
 
     # --- 既存: 自動応答ロジック ---
