@@ -13,3 +13,6 @@ Discordサーバー「めめ鯖」向けの自動応答・おみくじボット�
 2. `config.json` に反応させたいチャンネルIDを記述。
 3. `responses.yml` にトリガーと応答を記述。
 4. `python main.py` で起動。
+
+## コマンド一覧
+- `!reload`: 設定と応答
