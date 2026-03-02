@@ -239,12 +239,16 @@ async def reload_command(interaction: discord.Interaction):
     target_channel = client.get_channel(netatwi_id)
 
     collected_texts = []
+    messages_seen_in_channel = set()
     scanned_messages_count = 0
     if target_channel:
         # 全てのメッセージを取得
         async for msg in target_channel.history(limit=None):
             scanned_messages_count += 1
             if msg.author.bot: continue
+            if msg.content:
+                messages_seen_in_channel.add(msg.content)
+
             for reaction in msg.reactions:
                 # 設定されたリアクション絵文字か判定 (柔軟な比較)
                 r_str = str(reaction.emoji)
@@ -254,7 +258,7 @@ async def reload_command(interaction: discord.Interaction):
                     break
 
     # 3. responses.yml への反映
-    if collected_texts:
+    if scanned_messages_count > 0:
         try:
             # 既存のファイルを読み込む（他のセクションを消さないため）
             if os.path.exists('responses.yml'):
@@ -264,16 +268,25 @@ async def reload_command(interaction: discord.Interaction):
                 res_data = {}
 
             # 「ネタツイ」セクションを更新（既存データを保持しつつ追加）
-            if "ネタツイ" not in res_data:
-                res_data["ネタツイ"] = []
+            old_list = res_data.get("ネタツイ") or []
             
+            # 削除ロジック: チャンネルに存在するがスタンプがないものを除外
+            collected_set = set(collected_texts)
+            removal_candidates = messages_seen_in_channel - collected_set
+            
+            filtered_list = [x for x in old_list if x not in removal_candidates]
+            removed_count = len(old_list) - len(filtered_list)
+
             # 重複排除して追加
-            existing_set = set(res_data["ネタツイ"])
+            existing_set = set(filtered_list)
             added_count = 0
             for text in collected_texts:
                 if text not in existing_set:
-                    res_data["ネタツイ"].append(text)
+                    filtered_list.append(text)
+                    existing_set.add(text)
                     added_count += 1
+            
+            res_data["ネタツイ"] = filtered_list
             
             with open('responses.yml', 'w', encoding='utf-8') as f:
                 yaml.dump(res_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
@@ -288,7 +301,7 @@ async def reload_command(interaction: discord.Interaction):
                 for i, text in enumerate(collected_texts, 1):
                     rf.write(f"[{i}]\n{text}\n\n---\n\n")
             
-            await status_msg.edit(content=f"✅ 成功！\nスキャンメッセージ数 / 収集ネタ数: `{scanned_messages_count} / {len(collected_texts)}`\n新規追加: `{added_count}`件")
+            await status_msg.edit(content=f"✅ 成功！\nスキャンメッセージ数 / 収集ネタ数: `{scanned_messages_count} / {len(collected_texts)}`\n新規追加: `{added_count}`件\n削除(スタンプ消失): `{removed_count}`件")
             await interaction.followup.send(file=discord.File(report_filename))
             
             os.remove(report_filename)
