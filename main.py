@@ -137,6 +137,14 @@ async def collect_netatwi_section():
             except Exception as e:
                 logging.error(f"Failed to update responses.yml: {e}")
 
+async def scheduled_restart():
+    """1週間ごとの定期再起動を実行"""
+    logging.info("Scheduled restart initiated.")
+    # 定期再起動であることを示すマーカーファイルを作成
+    with open("scheduled_restart.marker", "w") as f:
+        f.write("1")
+    os.execv(sys.executable, ['python3'] + sys.argv)
+
 # --- 既存の読み込み関数 ---
 def load_config():
     global config
@@ -239,22 +247,20 @@ async def reload_command(interaction: discord.Interaction):
     target_channel = client.get_channel(netatwi_id)
 
     collected_texts = []
-    messages_seen_in_channel = set()
     scanned_messages_count = 0
     if target_channel:
         # 全てのメッセージを取得
         async for msg in target_channel.history(limit=None):
             scanned_messages_count += 1
             if msg.author.bot: continue
-            if msg.content:
-                messages_seen_in_channel.add(msg.content)
 
             for reaction in msg.reactions:
                 # 設定されたリアクション絵文字か判定 (柔軟な比較)
                 r_str = str(reaction.emoji)
                 if r_str == trigger_emoji or r_str == "🇳" or "regional_indicator_n" in r_str:
-                    if msg.content and msg.content not in collected_texts:
-                        collected_texts.append(msg.content)
+                    content = msg.content.strip()
+                    if content and content not in collected_texts:
+                        collected_texts.append(content)
                     break
 
     # 3. responses.yml への反映
@@ -268,25 +274,19 @@ async def reload_command(interaction: discord.Interaction):
                 res_data = {}
 
             # 「ネタツイ」セクションを更新（既存データを保持しつつ追加）
-            old_list = res_data.get("ネタツイ") or []
-            
-            # 削除ロジック: チャンネルに存在するがスタンプがないものを除外
-            collected_set = set(collected_texts)
-            removal_candidates = messages_seen_in_channel - collected_set
-            
-            filtered_list = [x for x in old_list if x not in removal_candidates]
-            removed_count = len(old_list) - len(filtered_list)
+            old_list = res_data.get("ネタツイ", [])
+            # 比較のため、ファイルから読み込んだリストも空白を除去し、重複を排除
+            old_set = {text.strip() for text in old_list if isinstance(text, str) and text.strip()}
+            collected_set = set(collected_texts) # 収集時に整形済み
 
-            # 重複排除して追加
-            existing_set = set(filtered_list)
-            added_count = 0
-            for text in collected_texts:
-                if text not in existing_set:
-                    filtered_list.append(text)
-                    existing_set.add(text)
-                    added_count += 1
-            
-            res_data["ネタツイ"] = filtered_list
+            # 新規追加、削除された件数を計算
+            added_count = len(collected_set - old_set)
+            removed_count = len(old_set - collected_set)
+
+            # 「ネタツイ」セクションを収集した最新のリストで完全に上書き
+            # これにより、スタンプが消されたものやメッセージ自体が削除されたものが反映される
+            # 順序を維持するために collected_texts をそのまま使う
+            res_data["ネタツイ"] = collected_texts
             
             with open('responses.yml', 'w', encoding='utf-8') as f:
                 yaml.dump(res_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
@@ -301,7 +301,7 @@ async def reload_command(interaction: discord.Interaction):
                 for i, text in enumerate(collected_texts, 1):
                     rf.write(f"[{i}]\n{text}\n\n---\n\n")
             
-            await status_msg.edit(content=f"✅ 成功！\nスキャンメッセージ数 / 収集ネタ数: `{scanned_messages_count} / {len(collected_texts)}`\n新規追加: `{added_count}`件\n削除(スタンプ消失): `{removed_count}`件")
+            await status_msg.edit(content=f"✅ 成功！\nスキャンメッセージ数 / 収集ネタ数: `{scanned_messages_count} / {len(collected_texts)}`\n新規追加: `{added_count}`件\n削除: `{removed_count}`件")
             await interaction.followup.send(file=discord.File(report_filename))
             
             os.remove(report_filename)
@@ -381,6 +381,7 @@ async def on_ready():
     scheduler = AsyncIOScheduler()
     scheduler.add_job(sync_git_repository, 'interval', minutes=10)
     scheduler.add_job(collect_netatwi_section, 'interval', minutes=60)
+    scheduler.add_job(scheduled_restart, 'interval', weeks=1)
     scheduler.start()
 
     # --- 既存の自己紹介をインポートする処理 ---
@@ -414,11 +415,22 @@ async def on_ready():
     if sys_log_id:
         sys_channel = client.get_channel(sys_log_id)
         if sys_channel:
-            embed = discord.Embed(title="再起動しました！", color=0x2ecc71, timestamp=now_utc)
+            if os.path.exists("scheduled_restart.marker"):
+                title_text = "再起動しました！ (定期スケジュール)"
+                desc_text = "定期スケジュールによる再起動を実施しました。"
+                try:
+                    os.remove("scheduled_restart.marker")
+                except Exception:
+                    pass
+            else:
+                title_text = "再起動しました！（手動再起動要求）"
+                desc_text = "再起動が要求されたため再起動しました。"
+
+            embed = discord.Embed(title=title_text, color=0x2ecc71, timestamp=now_utc)
             embed.add_field(name="ステータス", value="✅ 正常稼働中", inline=True)
             embed.add_field(name="過去ログ同期", value=f"✅ {count}件インポート済み", inline=True)
             embed.add_field(name="JST (日本標準時)", value=f"`{now_jst.strftime('%Y-%m-%d %H:%M:%S')}`", inline=False)
-            embed.add_field(name="", value="再起動が要求されたため、再起動しました。", inline=False)
+            embed.add_field(name="", value=desc_text, inline=False)
             await sys_channel.send(embed=embed)
 
 async def generate_monthly_report(interaction: discord.Interaction):
@@ -611,6 +623,8 @@ async def on_message(message):
         embed.add_field(name="!reload", value="設定とGit同期を手動実行", inline=False)
         embed.add_field(name="!logreset", value="ログファイルをリセット", inline=False)
         embed.add_field(name="!restart", value="ボットを再起動（管理者のみ）", inline=False)
+        github_url = config.get("github_url", "https://github.com/")
+        embed.add_field(name="💻 GitHub", value=f"[リポジトリ]({github_url})", inline=False)
         if is_admin:
             embed.set_footer(text="INFO：あなたのユーザーIDから管理権限を確認しました。\n管理者専用コマンドの使用が許可されています。")
         await message.channel.send(embed=embed)
