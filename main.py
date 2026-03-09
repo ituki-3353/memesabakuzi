@@ -320,6 +320,70 @@ async def restart_command(interaction: discord.Interaction):
     await interaction.response.send_message("🔄 再起動します...")
     os.execv(sys.executable, ['python3'] + sys.argv)
 
+@tree.command(name="repair", description="ボットの自己診断と自己修復を試みます（管理者のみ）")
+async def repair_command(interaction: discord.Interaction):
+    admin_ids = config.get("admin_user_id", [])
+    if interaction.user.id not in admin_ids:
+        await interaction.response.send_message("⚠️ 権限がありません。", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    embed = discord.Embed(title="🤖 自己診断＆修復レポート", color=0xf1c40f, timestamp=datetime.now())
+    report_lines = []
+
+    # --- 1. Check essential files ---
+    report_lines.append("--- 1. ファイルチェック ---")
+    essential_files = {
+        "config.json": "{}",
+        "responses.yml": "# Add your triggers and responses here\n",
+        "user_intros.json": "{}"
+    }
+    for filename, default_content in essential_files.items():
+        if not os.path.exists(filename):
+            report_lines.append(f"🟡 **`{filename}`** が見つかりません。空のファイルを作成します。")
+            try:
+                with open(filename, "w", encoding="utf-8") as f:
+                    f.write(default_content)
+                report_lines.append(f"✅ `{filename}` を作成しました。")
+            except Exception as e:
+                report_lines.append(f"❌ `{filename}` の作成に失敗: {e}")
+        else:
+            report_lines.append(f"✅ **`{filename}`** は存在します。")
+
+    # --- 2. Reload configurations ---
+    report_lines.append("\n--- 2. 設定ファイル再読み込み ---")
+    try:
+        load_config()
+        report_lines.append("✅ `config.json` を再読み込みしました。")
+    except Exception as e:
+        report_lines.append(f"❌ `config.json` の読み込みに失敗: {e}")
+
+    try:
+        load_responses()
+        report_lines.append("✅ `responses.yml` を再読み込みしました。")
+    except Exception as e:
+        report_lines.append(f"❌ `responses.yml` の読み込みに失敗: {e}")
+
+    try:
+        load_intro_data()
+        report_lines.append("✅ `user_intros.json` を再読み込みしました。")
+    except Exception as e:
+        report_lines.append(f"❌ `user_intros.json` の読み込みに失敗: {e}")
+
+    # --- 3. Git Sync ---
+    report_lines.append("\n--- 3. Gitリポジトリ同期 ---")
+    try:
+        await sync_git_repository()
+        report_lines.append("✅ Git同期処理が完了しました。（詳細はコンソールログを確認）")
+    except Exception as e:
+        report_lines.append(f"❌ Git同期中にエラーが発生: {e}")
+
+    embed.description = "\n".join(report_lines)
+    embed.set_footer(text="診断が完了しました。問題が解決しない場合は手動での確認が必要です。")
+
+    await interaction.followup.send(embed=embed)
+
 @tree.command(name="status", description="統計と直近ログを表示")
 async def status_command(interaction: discord.Interaction):
     now_dt = datetime.now()
