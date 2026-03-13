@@ -13,6 +13,10 @@ from dotenv import load_dotenv
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler # 追加
 from discord import app_commands
+# --- 追加ライブラリ ---
+import matplotlib.pyplot as plt
+import io
+
 
 config = {}
 cached_responses = {}
@@ -216,6 +220,45 @@ def get_shuffled_response(trigger):
         shuffle_pools[trigger] = list(cached_responses[trigger])
         random.shuffle(shuffle_pools[trigger])
     return shuffle_pools[trigger].pop()
+
+# --- 追加: グラフ生成関数 ---
+import matplotlib.font_manager as fm
+
+def create_netatwi_pie_chart(data_dict):
+    labels = list(data_dict.keys())
+    values = list(data_dict.values())
+
+    # フォントファイルを直接指定（先ほどの確認結果に基づいています）
+    font_path = '/usr/share/fonts/opentype/ipaexfont-gothic/ipaexg.ttf'
+    jp_font = fm.FontProperties(fname=font_path)
+
+    plt.figure(figsize=(8, 6))
+    
+    # グラフの各パーツにフォントを適用
+    # labelsに対して fontproperties を指定
+    patches, texts, autotexts = plt.pie(
+        values, 
+        labels=labels, 
+        autopct='%1.1f%%', 
+        startangle=140, 
+        colors=plt.cm.Paired.colors
+    )
+    
+    # テキストラベル（ユーザー名など）に日本語フォントをセット
+    for t in texts:
+        t.set_fontproperties(jp_font)
+    
+    # グラフ中央の％表示（autotexts）は数字だけなのでそのままでもOKですが、念のため
+    # for at in autotexts:
+    #     at.set_fontproperties(jp_font)
+
+    plt.title("ネタツイ ユーザー投稿割合", fontproperties=jp_font, fontsize=16)
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    return buf
 
 config = load_config()
 load_responses()
@@ -427,6 +470,60 @@ async def monthly_report_command(interaction: discord.Interaction):
     # ※長くなるため、on_message側の実装を関数化するのが理想ですが、
     # 今回はリクエストに従いコマンド内に展開します。
     await generate_monthly_report(interaction)
+
+# --- スラッシュコマンド追加: /report ---
+@tree.command(name="report", description="各種レポートを表示します")
+@app_commands.describe(type="レポートの種類（例：ネタツイ）")
+async def report_command(interaction: discord.Interaction, type: str):
+    if type != "ネタツイ":
+        await interaction.response.send_message("現在サポートされている引数は「ネタツイ」のみです。", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    target_channel_id = config.get("netatwi_channel_id")
+    trigger_emoji = config.get("reaction_trigger", "🇳").strip()
+    channel = client.get_channel(target_channel_id)
+
+    if not channel:
+        await interaction.followup.send("ネタツイ用のチャンネルが見つかりません。")
+        return
+
+    # ユーザーごとの集計
+    user_counts = {}
+    async for msg in channel.history(limit=None):
+        if msg.author.bot: continue
+        
+        is_netatwi = False
+        for reaction in msg.reactions:
+            r_str = str(reaction.emoji)
+            if r_str == trigger_emoji or r_str == "🇳" or "regional_indicator_n" in r_str:
+                # 最小リアクション数のチェック
+                if reaction.count >= config.get("min_reaction_count", 1):
+                    is_netatwi = True
+                    break
+        
+        if is_netatwi:
+            username = msg.author.display_name
+            user_counts[username] = user_counts.get(username, 0) + 1
+
+    if not user_counts:
+        await interaction.followup.send("集計対象となるネタツイが見つかりませんでした。")
+        return
+
+    # グラフ作成
+    chart_buf = create_netatwi_pie_chart(user_counts)
+    file = discord.File(chart_buf, filename="netatwi_report.png")
+
+    embed = discord.Embed(
+        title="📊 ネタツイ報告書",
+        description=f"現在の「ネタツイ」認定メッセージのユーザー割合です。\n総ネタ数: {sum(user_counts.values())}件",
+        color=0x1abc9c,
+        timestamp=datetime.now()
+    )
+    embed.set_image(url="attachment://netatwi_report.png")
+
+    await interaction.followup.send(embed=embed, file=file)
 
 # --- 3. イベントハンドラ ---
 
